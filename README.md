@@ -103,3 +103,31 @@ printing URL-embedded credentials. Tests use fixtures; a real Helius
 connection has not been tested without a securely configured key.
 
 Source: https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress
+
+## Hosted collector service
+
+Start command: `python service.py`. Build command:
+`python -m unittest discover -s tests -v` (no third-party packages required).
+
+The public `/health` endpoint reports process availability only; it is not a feed
+readiness check. `/status` requires `Authorization: Bearer <STATUS_TOKEN>` and shows
+missing configuration and collector freshness without wallet addresses or secrets.
+Set a long random `STATUS_TOKEN` directly in Render Environment settings.
+
+The collector waits until ALL prerequisites are present:
+- `HELIUS_API_KEY`: set directly in Render Environment.
+- `WATCH_WALLETS`: comma-separated public Solana addresses, at most five. These
+  are research candidates, not automatically approved profitable wallets.
+- A persistent disk mounted at `/var/data`. The service verifies the mount
+  and refuses to collect onto ephemeral storage.
+
+With configuration complete it collects at most two pages per wallet every five
+minutes. This cadence is for initial data validation, not instant copy trading.
+Failures and history gaps are shown in authenticated status. A capped page scan
+can remain behind a very active wallet; do not use it for signals until caught up.
+Raw histories are not automatically USD-priced, ranked, or paper-traded yet.
+Only one service instance should run against this SQLite disk.
+
+For always-on collection use paid compute plus a persistent disk. Free compute
+is suitable for the initial setup service only, may sleep, and cannot provide
+24/7 monitoring. No authenticated exchange or live execution is implemented.
