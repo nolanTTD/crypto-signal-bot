@@ -77,3 +77,29 @@ that silently makes this research engine spend money.
 The repository is public. Keep all keys in hosting secret settings and all runtime
 data outside Git. Logs must not include secrets. The previously exposed key is not
 included. No withdrawal, transfer, bank or funding functionality is implemented.
+
+## Helius collector (added)
+
+`helius_feed.py` reads finalized enhanced transaction history and saves raw
+responses in SQLite. It is a read-only, bounded polling building block, NOT a
+live trading loop or wallet ranking feed. It does not yet convert swaps into
+USD-priced fills. The enhanced endpoint is documented by Helius as legacy;
+keep this adapter isolated for future migration to Parsed Events.
+
+Set `HELIUS_API_KEY` directly in secure environment settings, never in chat or
+Git. Then run:
+
+```sh
+python helius_feed.py PUBLIC_SOLANA_WALLET --db research.sqlite3 --max-pages 5
+```
+
+Each page requests at most 100 transactions. Initial history is bounded and
+explicitly incomplete. On later runs the collector scans back to the prior
+head. If the page budget is exhausted, it reports `caught_up: false` and does
+not advance that cursor. Increase the bounded page budget or backfill before
+using the wallet as a signal source. Do not infer that an address is a whale
+merely because it has been collected. API failures are redacted to avoid
+printing URL-embedded credentials. Tests use fixtures; a real Helius
+connection has not been tested without a securely configured key.
+
+Source: https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress
