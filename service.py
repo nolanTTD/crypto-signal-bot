@@ -8,6 +8,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from helius_feed import collect
+from discovery import discover, screen, setup
 
 STOP = threading.Event()
 STATE = {'mode': 'research-only', 'live_execution': False, 'collection': 'waiting',
@@ -20,8 +21,8 @@ def prerequisites():
     if not os.environ.get('HELIUS_API_KEY', '').strip():
         missing.append('HELIUS_API_KEY')
     wallets = list(dict.fromkeys(w.strip() for w in os.environ.get('WATCH_WALLETS', '').split(',') if w.strip()))
-    if not wallets:
-        missing.append('WATCH_WALLETS')
+    if not wallets and os.environ.get('DISCOVERY_ENABLED') != 'true':
+        missing.append('WATCH_WALLETS_OR_DISCOVERY_ENABLED')
     if len(wallets) > 5:
         missing.append('WATCH_WALLETS_MAX_5')
     # Collector deliberately refuses ephemeral storage on the hosted service.
@@ -48,21 +49,32 @@ def loop():
                 count = 0
                 gaps = False
                 with sqlite3.connect('/var/data/research.sqlite3', timeout=30) as db:
+                    setup(db)
+                    if not wallets:
+                        wallets = discover(db, os.environ['HELIUS_API_KEY'])
                     for wallet in wallets:
                         if STOP.is_set():
                             break
-                        r = collect(db, wallet, os.environ['HELIUS_API_KEY'], max_pages=2)
+                        r = collect(db, wallet, os.environ['HELIUS_API_KEY'], max_pages=1)
                         count += r['new_transactions']
                         gaps = gaps or not r['caught_up']
+                    reports = screen(db, wallets)
+                    meta = dict(db.execute('SELECT key,value FROM discovery_meta')) if os.environ.get('DISCOVERY_ENABLED') == 'true' else {}
                 with LOCK:
-                    STATE.update(collection='history_gap' if gaps else 'caught_up',
+                    STATE.update(collection=(('discovery_error' if int(meta.get('seed_request_errors', 0)) else 'no_candidates') if not wallets else ('history_gap' if gaps else 'caught_up')),
                                  last_success=time.time(), last_error=None)
                     STATE['new_transactions'] += count
+                    STATE['wallet_reports'] = reports
+                    STATE['discovery'] = meta
+                print(json.dumps({'event':'research_cycle', 'wallet_count':len(wallets),
+                                  'new_transactions':count, 'history_gap':gaps,
+                                  'qualified_wallets':0}), flush=True)
             except Exception:
                 # Third-party and database exceptions may contain URLs or data.
                 with LOCK:
                     STATE.update(collection='error', last_error='Collection failed; sensitive details suppressed')
-        STOP.wait(300)
+                print('Research cycle failed; sensitive details suppressed', flush=True)
+        STOP.wait(3600)
 
 
 class Handler(BaseHTTPRequestHandler):

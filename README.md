@@ -1,10 +1,14 @@
-# Crypto Signal Bot — research foundation
+# Crypto Signal Research
 
-**Status: paper-only core, not deployed; no continuous wallet feed or live orders.**
-No API keys, exchange account, wallet private key, or personal holdings are required.
-Python 3.11+; standard library only.
+**Read-only discovery and screening service; live trading is not implemented.**
+The Render service is deployed with persistent storage. Its current readiness and
+actual counts must be checked using authenticated `/status`; process health alone
+is not evidence that collection or strategy research is succeeding.
 
-## Run
+Python 3.11+; standard library only. No private wallet, exchange credentials,
+account holdings, deposits or withdrawals are needed for this research service.
+
+## Run and test
 
 ```sh
 python -m unittest discover -s tests -v
@@ -12,122 +16,101 @@ python bot.py status
 python bot.py quote SOL
 python bot.py import-trades decoded_trades.csv
 python bot.py rank
+python service.py
 ```
 
-Public quotes use Coinbase market data, not Crypto.com prices. Network access is required
-for `quote`; account access is not. An old last-trade timestamp is conservatively rejected
-by the simulator even if its bid/ask is current.
+The manual paper ledger and public quote command are separate from the hosted
+collector. Coinbase bid/ask is public reference data, not Crypto.com executable
+pricing. No autonomous paper strategy loop has been connected yet.
 
-## What is implemented
+## Hosted configuration
 
-- Atomic, idempotent SQLite ingestion of normalized buy/sell fills.
-- Average-cost realized USD PnL and missing-cost-basis flags. Sell-fill counts are
-  not round-trip counts. Incomplete wallets must be excluded from selection.
-- Consensus function over a preselected wallet roster: each address gets one vote;
-  any sell vote vetoes entry. Roster selection must precede evaluation.
-- Paper execution with bid/ask, illustrative 0.6% fee and 0.1% slippage per side,
-  freshness/spread checks, $100 position cap, three positions maximum, no shorts
-  and no borrowing. These are simulation defaults, not approved live limits.
-- Durable paper ledger, transaction locking, duplicate order IDs and insufficient
-  cash checks. No authenticated exchange endpoints exist in this codebase.
+Start: `python service.py`. Build: `python -m unittest discover -s tests -v`.
+One paid Render instance, with a 1 GB disk mounted at `/var/data`.
 
-## Input contract
+Set directly in Render Environment settings:
+- `HELIUS_API_KEY`: private Helius credential. Never paste it into chat or Git.
+- `STATUS_TOKEN`: long random private token for `/status`.
+- `DISCOVERY_ENABLED=true`: enable bounded discovery if no explicit roster is set.
+- Optional `WATCH_WALLETS`: comma-separated public addresses, maximum five;
+  overrides automatic discovery and must contain only research candidates.
 
-CSV headers: `id,wallet,asset,side,quantity,price,fee,occurred`.
-`occurred` is a UTC Unix timestamp; prices and fees are USD. `id` must uniquely
-identify each fill (chain + transaction + instruction/log index). `asset` should
-be chain + contract/mint for wallet analysis, not an ambiguous ticker.
-Imports are timestamped when observed. Transfers, airdrops and unsupported
-transactions must not be represented as buys/sells. Historical imports cannot
-be replayed as if known earlier. Wallet rankings are descriptive, not evidence
-of future performance. No annualized return or return-on-capital is inferred.
+Without a mounted disk or key the collector waits. Public `/health` is a
+process-only check; `/status` requires `Authorization: Bearer <STATUS_TOKEN>`.
+There is no public portfolio, wallet list, control endpoint or trading API.
 
-## Architecture decision
+## Discovery and screening
 
-Reviewed references (no third-party code copied):
-- https://github.com/crypto-com/crypto-agent-trading : official App quote/confirm
-  execution flow. Integrate later behind a separate risk-controlled adapter.
-- https://github.com/Kelows/million : wallet-to-token discovery, independent-owner
-  consensus, token checks and shadow portfolios. It is Solana/DEX oriented;
-  directly adopting its executor would not give Crypto.com App execution.
+`discovery.py` samples recent finalized history for the canonical wrapped SOL
+and Circle USDC mints. These are narrow, incomplete discovery samples, NOT an
+exhaustive DEX or full-market scan. Successful SWAP fee payers become candidates;
+fee payers may be routers, relayers or bots and are not automatically identified
+as traders. Source transactions and selection time are retained in SQLite.
 
-We use explicit boundaries: decoded wallet feed -> identity/quality checks ->
-wallet scoring -> signal -> risk checks -> paper executor -> durable audit log.
-Live execution will be a separate reviewed component, not an environment switch
-that silently makes this research engine spend money.
+The first five research candidates are frozen into a roster, selected by observed
+swap count, NOT by future profits. Two seed-history requests run at most daily;
+each roster wallet gets at most one 100-transaction page hourly. Normal operation
+uses at most 122 history requests/day (2 + 5*24), excluding manual restarts and
+invocations. Check actual credit consumption in Helius. No upgrades are automatic.
+This initial cadence validates data and is not suitable for instant copy trading.
 
-## Remaining before an actual 24/7 test
+`helius_feed.py` deduplicates raw transactions and checkpoints history. An initial
+bounded snapshot is never labelled full history. Subsequent capped scans report
+gaps and preserve the cursor if they fail to reach it. Very active wallets can
+outgrow the scan budget and must not be used for signals in that condition.
 
-1. Connect a decoded blockchain data provider (initial candidate: Helius for Solana),
-   review current costs/limits, and add an ingestion adapter with retries and checkpoints.
-2. Discover and evaluate wallets; identify common owners, routers and bots. Current
-   consensus counts addresses, NOT independently verified owners.
-3. Add contract-to-Crypto.com asset mapping and verified available-token/liquidity filters.
-4. Wire signals to fresh execution quotes, simulated exits, mark-to-market equity,
-   drawdowns, benchmarks, adverse cost scenarios and rejection logs. The core functions
-   here do not yet run an autonomous strategy loop.
-5. Freeze selection rules before forward testing; evaluate on new data after costs.
-6. Confirm Render workspace, add monitoring and persistent storage, verify restart
-   recovery, and deploy. No always-on service has been provisioned.
-7. Only after review: securely configure a new Crypto.com key and separately approve
-   a small live mandate. Never put credentials or private portfolio data in this repo.
+Reports under authenticated `/status` include:
+- Candidate addresses and counts of conservatively decoded swaps.
+- Matched sell fills and sample gross realized PnL in **USDC units**, not USD.
+- Reasons for skipping history items and blocking qualification.
 
-## Security
+Only simple two-token native-USDC swaps with wallet-owned transfer legs are
+decoded. Native SOL, ambiguous extra legs, failed transactions and transfers are
+rejected. Gross sample PnL excludes network fees, copy delay, spread and slippage;
+USDC is not assumed exactly equivalent to USD. Unknown cost basis is flagged.
+Every candidate remains unqualified because history, ownership, independent-owner
+clustering, token availability, costs and forward performance are not verified.
+Reports cannot automatically authorize or enable trading.
 
-The repository is public. Keep all keys in hosting secret settings and all runtime
-data outside Git. Logs must not include secrets. The previously exposed key is not
-included. No withdrawal, transfer, bank or funding functionality is implemented.
+## Manual paper engine
 
-## Helius collector (added)
+`bot.py` accepts normalized CSV fields:
+`id,wallet,asset,side,quantity,price,fee,occurred`.
+Amounts are USD for this separate manual engine. IDs must uniquely identify fills;
+assets should be chain + mint/contract. Occurred timestamps are UTC Unix seconds;
+observed timestamps are recorded at ingestion. Transfers are not fills.
 
-`helius_feed.py` reads finalized enhanced transaction history and saves raw
-responses in SQLite. It is a read-only, bounded polling building block, NOT a
-live trading loop or wallet ranking feed. It does not yet convert swaps into
-USD-priced fills. The enhanced endpoint is documented by Helius as legacy;
-keep this adapter isolated for future migration to Parsed Events.
+The paper executor uses bid/ask with illustrative 0.6% fees and 0.1% slippage each
+side (NOT verified Crypto.com costs), quote freshness/spread checks, a $100
+position cap, maximum three positions, no shorts, no leverage, transactional
+locking and duplicate order protection. These are research defaults, not approved
+live limits. Consensus uses a preselected address roster, not verified owners.
 
-Set `HELIUS_API_KEY` directly in secure environment settings, never in chat or
-Git. Then run:
+## Remaining work
 
-```sh
-python helius_feed.py PUBLIC_SOLANA_WALLET --db research.sqlite3 --max-pages 5
-```
+- Validate live provider responses, API credits, retained evidence and restart recovery.
+- Broaden discovery to verified liquidity pools and screen infrastructure/bot activity.
+- Complete inventory histories, robust trade decoding and independent-owner detection.
+- Map contracts to currently available Crypto.com tokens and liquidity constraints.
+- Connect forward paper signals, entries/exits, mark-to-market, drawdowns and benchmarks.
+- Test new-data performance after realistic execution costs and adverse scenarios.
+- Separately review and approve a live mandate only if supported by results.
 
-Each page requests at most 100 transactions. Initial history is bounded and
-explicitly incomplete. On later runs the collector scans back to the prior
-head. If the page budget is exhausted, it reports `caught_up: false` and does
-not advance that cursor. Increase the bounded page budget or backfill before
-using the wallet as a signal source. Do not infer that an address is a whale
-merely because it has been collected. API failures are redacted to avoid
-printing URL-embedded credentials. Tests use fixtures; a real Helius
-connection has not been tested without a securely configured key.
+## Security and provenance
 
-Source: https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress
+The repo is public. Credentials and runtime databases must never be committed.
+All public HTTP endpoints omit sensitive details. API URLs containing keys and
+third-party error strings are suppressed from logs. Trading, funding, transfers,
+withdrawals and bank operations are not implemented.
 
-## Hosted collector service
+No third-party code copied. Architecture references reviewed:
+- https://github.com/crypto-com/crypto-agent-trading
+- https://github.com/Kelows/million
 
-Start command: `python service.py`. Build command:
-`python -m unittest discover -s tests -v` (no third-party packages required).
+API/schema references:
+- https://www.helius.dev/docs/api-reference/enhanced-transactions/gettransactionsbyaddress
+- https://help.circle.com/support/en/usdc-supported-blockchains-minting-redemption-faqs?id=kb_article_view&sysparm_article=KB0010590
+- https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-ticker
 
-The public `/health` endpoint reports process availability only; it is not a feed
-readiness check. `/status` requires `Authorization: Bearer <STATUS_TOKEN>` and shows
-missing configuration and collector freshness without wallet addresses or secrets.
-Set a long random `STATUS_TOKEN` directly in Render Environment settings.
-
-The collector waits until ALL prerequisites are present:
-- `HELIUS_API_KEY`: set directly in Render Environment.
-- `WATCH_WALLETS`: comma-separated public Solana addresses, at most five. These
-  are research candidates, not automatically approved profitable wallets.
-- A persistent disk mounted at `/var/data`. The service verifies the mount
-  and refuses to collect onto ephemeral storage.
-
-With configuration complete it collects at most two pages per wallet every five
-minutes. This cadence is for initial data validation, not instant copy trading.
-Failures and history gaps are shown in authenticated status. A capped page scan
-can remain behind a very active wallet; do not use it for signals until caught up.
-Raw histories are not automatically USD-priced, ranked, or paper-traded yet.
-Only one service instance should run against this SQLite disk.
-
-For always-on collection use paid compute plus a persistent disk. Free compute
-is suitable for the initial setup service only, may sleep, and cannot provide
-24/7 monitoring. No authenticated exchange or live execution is implemented.
+Helius labels Enhanced Transactions as legacy; keep that adapter isolated for
+migration. No wallet-performance or profitability claims have been verified.
