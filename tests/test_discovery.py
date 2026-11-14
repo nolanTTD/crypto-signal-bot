@@ -59,3 +59,16 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIn('unknown_cost_basis',r['qualification_blocks'])
         self.assertEqual(r['sample_realized_gross_usdc'],0)
         db.close()
+
+    def test_errors_report_codes_only_and_do_not_retry_unbounded(self):
+        db=sqlite3.connect(':memory:'); calls=[]
+        def fetch(*args):
+            calls.append(1)
+            raise RuntimeError('Helius HTTP 401; request URL redacted')
+        discover(db,'SECRET',fetch,1000)
+        discover(db,'SECRET',fetch,1001)
+        meta=dict(db.execute('SELECT key,value FROM discovery_meta'))
+        self.assertEqual(len(calls),2)
+        self.assertEqual(meta['request_error_codes'],'["HTTP_401", "HTTP_401"]')
+        self.assertNotIn('SECRET',json.dumps(meta))
+        db.close()

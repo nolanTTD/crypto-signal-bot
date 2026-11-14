@@ -33,12 +33,15 @@ def discover(db, key, fetch=history, now=None):
     setup(db)
     now = time.time() if now is None else now
     last = db.execute("SELECT value FROM discovery_meta WHERE key='last_attempt'").fetchone()
-    if last and now-float(last[0]) < 86400:
+    version = db.execute("SELECT value FROM discovery_meta WHERE key='version'").fetchone()
+    if version and version[0] == '0.3.1' and last and now-float(last[0]) < 86400:
         return [r[0] for r in db.execute('SELECT wallet FROM research_roster ORDER BY wallet')]
     # Persist budget before requests, so a failing provider is not hammered.
     with db:
         db.execute("INSERT OR REPLACE INTO discovery_meta VALUES ('last_attempt',?)", (str(now),))
+        db.execute("INSERT OR REPLACE INTO discovery_meta VALUES ('version','0.3.1')")
     errors = 0
+    error_codes = []
     for seed in SEEDS:
         try:
             rows = fetch(seed, key)
@@ -50,8 +53,10 @@ def discover(db, key, fetch=history, now=None):
                         continue
                     db.execute('INSERT OR IGNORE INTO discovery_evidence VALUES (?,?,?,?,?)',
                                (seed, tx['signature'], wallet, now, json.dumps(tx)))
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as error:
             errors += 1
+            match = re.search(r'Helius HTTP ([0-9]{3})', str(error))
+            error_codes.append('HTTP_'+match[1] if match else 'NETWORK_OR_SCHEMA')
     counts = Counter(r[0] for r in db.execute(
         'SELECT wallet FROM discovery_evidence WHERE observed>=? GROUP BY wallet,signature',
         (now-86400,)))
@@ -63,7 +68,7 @@ def discover(db, key, fetch=history, now=None):
                            (wallet, now, 'swap fee-payer candidate; ownership unverified'))
     with db:
         for k, v in {'last_completed': now, 'seed_request_errors': errors,
-                     'candidate_addresses': len(counts)}.items():
+                     'candidate_addresses': len(counts), 'request_error_codes': json.dumps(error_codes)}.items():
             db.execute('INSERT OR REPLACE INTO discovery_meta VALUES (?,?)', (k, str(v)))
     return [r[0] for r in db.execute('SELECT wallet FROM research_roster ORDER BY wallet')]
 

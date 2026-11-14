@@ -62,7 +62,8 @@ def loop():
                     meta = dict(db.execute('SELECT key,value FROM discovery_meta')) if os.environ.get('DISCOVERY_ENABLED') == 'true' else {}
                 with LOCK:
                     STATE.update(collection=(('discovery_error' if int(meta.get('seed_request_errors', 0)) else 'no_candidates') if not wallets else ('history_gap' if gaps else 'caught_up')),
-                                 last_success=time.time(), last_error=None)
+                                 last_success=time.time() if wallets else STATE.get('last_success'),
+                                 last_error='Discovery requests failed' if int(meta.get('seed_request_errors',0)) else None)
                     STATE['new_transactions'] += count
                     STATE['wallet_reports'] = reports
                     STATE['discovery'] = meta
