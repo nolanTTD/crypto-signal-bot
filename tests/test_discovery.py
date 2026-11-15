@@ -72,3 +72,17 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(meta['request_error_codes'],'["HTTP_401", "HTTP_401"]')
         self.assertNotIn('SECRET',json.dumps(meta))
         db.close()
+
+    def test_changed_key_retries_once_without_exposing_fingerprint(self):
+        db=sqlite3.connect(':memory:'); calls=[]
+        def fetch(*args):
+            calls.append(1)
+            return []
+        discover(db,'old-key',fetch,1000)
+        discover(db,'new-key',fetch,1001)
+        discover(db,'new-key',fetch,1002)
+        self.assertEqual(len(calls),4)
+        meta=dict(db.execute('SELECT key,value FROM discovery_meta'))
+        self.assertNotIn('fingerprint',str(meta))
+        self.assertNotIn('new-key',str(meta))
+        db.close()

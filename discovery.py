@@ -1,4 +1,5 @@
 """Bounded read-only candidate discovery. No execution or automatic qualification."""
+import hashlib
 import json
 import math
 import re
@@ -21,6 +22,7 @@ def setup(db):
     CREATE TABLE IF NOT EXISTS research_roster (
       wallet TEXT PRIMARY KEY, selected REAL, source TEXT);
     CREATE TABLE IF NOT EXISTS discovery_meta (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS provider_config (name TEXT PRIMARY KEY, fingerprint TEXT);
     ''')
 
 
@@ -34,12 +36,15 @@ def discover(db, key, fetch=history, now=None):
     now = time.time() if now is None else now
     last = db.execute("SELECT value FROM discovery_meta WHERE key='last_attempt'").fetchone()
     version = db.execute("SELECT value FROM discovery_meta WHERE key='version'").fetchone()
-    if version and version[0] == '0.3.1' and last and now-float(last[0]) < 86400:
+    fingerprint = hashlib.sha256(key.encode()).hexdigest()
+    prior_key = db.execute("SELECT fingerprint FROM provider_config WHERE name='helius'").fetchone()
+    if prior_key and prior_key[0] == fingerprint and version and version[0] == '0.3.1' and last and now-float(last[0]) < 86400:
         return [r[0] for r in db.execute('SELECT wallet FROM research_roster ORDER BY wallet')]
     # Persist budget before requests, so a failing provider is not hammered.
     with db:
         db.execute("INSERT OR REPLACE INTO discovery_meta VALUES ('last_attempt',?)", (str(now),))
         db.execute("INSERT OR REPLACE INTO discovery_meta VALUES ('version','0.3.1')")
+        db.execute("INSERT OR REPLACE INTO provider_config VALUES ('helius',?)", (fingerprint,))
     errors = 0
     error_codes = []
     for seed in SEEDS:
