@@ -114,3 +114,19 @@ API/schema references:
 
 Helius labels Enhanced Transactions as legacy; keep that adapter isolated for
 migration. No wallet-performance or profitability claims have been verified.
+
+
+## Decoder and resumable history update
+
+Native SOL swaps now use explicit outer `events.swap` inputs/outputs with verified
+wallet ownership fields and exact lamport/decimal conversion. Nested route swaps
+are not counted again; ambiguous, missing-owner and malformed events are rejected.
+SOL-quoted and USDC-quoted cost basis/PnL remain separate. These are gross samples,
+not net performance or USD returns. Token-only fallback remains conservative.
+
+Gap scans now persist target, newest boundary and before-signature in a separate
+SQLite table. Later hourly cycles resume the unfinished page range instead of
+repeatedly fetching the newest page. Advancing the completed head is atomic with
+page storage. No extra requests or paid-plan changes are introduced. Catch-up
+can still take time and busy wallets can still outrun the budget; pending scans
+and incomplete coverage remain blockers to using a wallet as a signal.

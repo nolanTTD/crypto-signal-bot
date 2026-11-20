@@ -50,41 +50,58 @@ def collect(db, wallet, key, max_pages=5, fetch=history):
       PRIMARY KEY(wallet,signature));
       CREATE TABLE IF NOT EXISTS helius_cursor (wallet TEXT PRIMARY KEY, head TEXT);
     ''')
+    # Persist the scan boundary separately from the last completed head.
+    db.execute('CREATE TABLE IF NOT EXISTS helius_sweep ('
+               'wallet TEXT PRIMARY KEY, target TEXT, newest TEXT, before_sig TEXT)')
     cursor = db.execute('SELECT head FROM helius_cursor WHERE wallet=?', (wallet,)).fetchone()
     previous = cursor[0] if cursor else None
-    before = None
-    newest = None
+    pending = db.execute('SELECT target,newest,before_sig FROM helius_sweep WHERE wallet=?',
+                         (wallet,)).fetchone()
+    target, newest, before = tuple(pending) if pending else (previous, None, None)
+    initial = previous is None
     caught_up = False
     count = 0
+    pages = 0
     for _ in range(max_pages):
         rows = fetch(wallet, key, before)
+        pages += 1
         if not rows:
             caught_up = True
+            with db:
+                if newest:
+                    db.execute('INSERT OR REPLACE INTO helius_cursor VALUES (?,?)', (wallet,newest))
+                db.execute('DELETE FROM helius_sweep WHERE wallet=?', (wallet,))
             break
         if newest is None:
             newest = rows[0]['signature']
         with db:
             for row in rows:
                 sig = row['signature']
-                if sig == previous:
+                if sig == target:
                     caught_up = True
                     break
                 result = db.execute('INSERT OR IGNORE INTO raw_helius VALUES (?,?,?,?)',
                                     (wallet, sig, time.time(), json.dumps(row)))
                 count += result.rowcount
-        if caught_up:
-            break
-        next_before = rows[-1]['signature']
-        if next_before == before:
+            next_before = rows[-1]['signature']
+            if initial:
+                # Establish a bounded baseline; never claim full historical coverage.
+                db.execute('INSERT OR REPLACE INTO helius_cursor VALUES (?,?)', (wallet,newest))
+                db.execute('DELETE FROM helius_sweep WHERE wallet=?', (wallet,))
+            elif caught_up:
+                db.execute('INSERT OR REPLACE INTO helius_cursor VALUES (?,?)', (wallet,newest))
+                db.execute('DELETE FROM helius_sweep WHERE wallet=?', (wallet,))
+            elif next_before != before:
+                db.execute('INSERT OR REPLACE INTO helius_sweep VALUES (?,?,?,?)',
+                           (wallet,target,newest,next_before))
+        if caught_up or initial or next_before == before:
             break
         before = next_before
-    # First run establishes a bounded baseline, explicitly not complete history.
-    if newest and (previous is None or caught_up):
-        with db:
-            db.execute('INSERT OR REPLACE INTO helius_cursor VALUES (?,?)', (wallet, newest))
     return {'new_transactions': count, 'caught_up': caught_up,
-            'initial_snapshot': previous is None, 'full_history_verified': False,
-            'orders_placed': 0}
+            'initial_snapshot': initial, 'full_history_verified': False,
+            'gap_scan_pending': bool(db.execute('SELECT 1 FROM helius_sweep WHERE wallet=?',
+                                               (wallet,)).fetchone()),
+            'pages_requested': pages, 'orders_placed': 0}
 
 
 def main():

@@ -86,3 +86,47 @@ class DiscoveryTests(unittest.TestCase):
         self.assertNotIn('fingerprint',str(meta))
         self.assertNotIn('new-key',str(meta))
         db.close()
+
+    def native_tx(self, buy=True, quote_usdc=False):
+        token={'userAccount':W,'mint':USDC if quote_usdc else T,
+               'rawTokenAmount':{'decimals':6,'tokenAmount':'100000000'}}
+        event={'tokenInputs':[],'tokenOutputs':[]}
+        event['nativeInput' if buy else 'nativeOutput']={'account':W,'amount':'1000000000'}
+        event['tokenOutputs' if buy else 'tokenInputs']=[token]
+        return {'type':'SWAP','feePayer':W,'signature':'native','timestamp':1000,
+                'events':{'swap':event},
+                'nativeTransfers':[{'fromUserAccount':W,'toUserAccount':T,'amount':1000000000}]}
+
+    def test_native_swap_quote_sol_and_usdc(self):
+        f, reason=decode(self.native_tx(),W)
+        self.assertIsNone(reason)
+        self.assertEqual((f['side'],f['quantity'],f['quote_amount'],f['quote_asset']),
+                         ('buy',100,1,SOL))
+        self.assertEqual(decode(self.native_tx(False),W)[0]['side'],'sell')
+        usdc=decode(self.native_tx(True,True),W)[0]
+        self.assertEqual((usdc['asset'],usdc['side'],usdc['quantity'],usdc['quote_amount']),
+                         (SOL,'sell',1,100))
+
+    def test_native_event_rejects_owner_decimals_and_duplicate_wrap(self):
+        a=self.native_tx();a['events']['swap']['nativeInput']['account']=T
+        b=self.native_tx();b['events']['swap']['tokenOutputs'][0]['rawTokenAmount']['decimals']=100
+        c=self.native_tx();c['events']['swap']['tokenOutputs'][0]['mint']=SOL
+        d=self.native_tx();d['events']['swap']['nativeInput']['amount']='NaN'
+        for row in [a,b,c,d]:self.assertIsNone(decode(row,W)[0])
+
+    def test_inner_swaps_never_count_twice(self):
+        row=self.native_tx()
+        row['events']['swap']['innerSwaps']=[row['events']['swap'].copy()]*3
+        self.assertEqual(decode(row,W)[0]['quote_amount'],1)
+
+    def test_sol_and_usdc_cost_basis_not_mixed(self):
+        db=sqlite3.connect(':memory:')
+        a=self.native_tx(); a['signature']='buy-sol'
+        b=tx('sell-usdc','sell');b['tokenTransfers'][1]['mint']=T
+        def fetch(w,k,before):return [a,b] if before is None else []
+        collect(db,W,'unused',fetch=fetch)
+        report=screen(db,[W])[0]
+        self.assertEqual(report['decoded_swaps'],2)
+        self.assertEqual(report['matched_sell_fills'],0)
+        self.assertIn('unknown_cost_basis',report['qualification_blocks'])
+        db.close()

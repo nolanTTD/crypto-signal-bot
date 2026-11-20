@@ -59,6 +59,8 @@ def loop():
                         count += r['new_transactions']
                         gaps = gaps or not r['caught_up']
                     reports = screen(db, wallets)
+                    persisted = db.execute('SELECT COUNT(*) FROM raw_helius').fetchone()[0] if wallets else 0
+                    pending_scans = db.execute('SELECT COUNT(*) FROM helius_sweep').fetchone()[0] if wallets else 0
                     meta = dict(db.execute('SELECT key,value FROM discovery_meta')) if os.environ.get('DISCOVERY_ENABLED') == 'true' else {}
                 with LOCK:
                     STATE.update(collection=(('discovery_error' if int(meta.get('seed_request_errors', 0)) else 'no_candidates') if not wallets else ('history_gap' if gaps else 'caught_up')),
@@ -66,10 +68,13 @@ def loop():
                                  last_error='Discovery requests failed' if int(meta.get('seed_request_errors',0)) else None)
                     STATE['new_transactions'] += count
                     STATE['wallet_reports'] = reports
+                    STATE['persisted_transactions'] = persisted
+                    STATE['pending_gap_scans'] = pending_scans
                     STATE['discovery'] = meta
                 print(json.dumps({'event':'research_cycle', 'wallet_count':len(wallets),
                                   'new_transactions':count, 'history_gap':gaps,
-                                  'qualified_wallets':0}), flush=True)
+                                  'qualified_wallets':0, 'decoded_swaps':sum(r['decoded_swaps'] for r in reports),
+                                  'persisted_transactions':persisted, 'pending_gap_scans':pending_scans}), flush=True)
             except Exception:
                 # Third-party and database exceptions may contain URLs or data.
                 with LOCK:

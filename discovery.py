@@ -1,4 +1,5 @@
 """Bounded read-only candidate discovery. No execution or automatic qualification."""
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
@@ -78,7 +79,7 @@ def discover(db, key, fetch=history, now=None):
     return [r[0] for r in db.execute('SELECT wallet FROM research_roster ORDER BY wallet')]
 
 
-def decode(tx, wallet):
+def decode_token_only(tx, wallet):
     """Conservative token-only USDC swaps; returns quote-denominated evidence.
 
     Reject extra token legs, unknown ownership, native SOL legs and side transfers.
@@ -122,6 +123,68 @@ def decode(tx, wallet):
         return None, 'malformed_swap'
 
 
+def event_legs(swap, wallet):
+    legs = []
+    for side, sign in [('Input', -1), ('Output', 1)]:
+        native = swap.get('native'+side)
+        if native:
+            if native.get('account') != wallet:
+                raise ValueError('event_owner_mismatch')
+            amount = Decimal(str(native['amount']))
+            if not amount.is_finite() or amount <= 0 or amount != amount.to_integral_value():
+                raise ValueError('invalid_native_amount')
+            legs.append((SOL, sign*amount/Decimal(10**9)))
+        for token in swap.get('token'+side+'s') or []:
+            if token.get('userAccount') != wallet:
+                raise ValueError('event_owner_mismatch')
+            if not ADDRESS.fullmatch(token.get('mint', '')):
+                raise ValueError('invalid_event_mint')
+            raw = token['rawTokenAmount']
+            decimals = raw['decimals']
+            if type(decimals) is not int or not 0 <= decimals <= 18:
+                raise ValueError('invalid_event_decimals')
+            amount = Decimal(str(raw['tokenAmount']))
+            if not amount.is_finite() or amount <= 0 or amount != amount.to_integral_value():
+                raise ValueError('invalid_event_amount')
+            legs.append((token['mint'], sign*amount/(Decimal(10)**decimals)))
+    return legs
+
+
+def decode(tx, wallet):
+    if tx.get('type') != 'SWAP' or tx.get('transactionError'):
+        return None, 'not_successful_swap'
+    if tx.get('feePayer') != wallet:
+        return None, 'payer_ownership_unverified'
+    swap = (tx.get('events') or {}).get('swap')
+    if not swap:
+        fill, reason = decode_token_only(tx, wallet)
+        if fill:
+            fill.update(quote_asset=USDC, decoder='token_transfers')
+        return fill, reason
+    try:
+        legs = event_legs(swap, wallet)
+        # Outer swap event only: never sum nested route swaps or wrapping legs.
+        if len(legs) != 2 or legs[0][0] == legs[1][0] or legs[0][1]*legs[1][1] >= 0:
+            return None, 'ambiguous_event_legs'
+        quote = USDC if any(m == USDC for m, _ in legs) else SOL
+        if not any(m == quote for m, _ in legs):
+            return None, 'unsupported_quote_asset'
+        asset, quantity = next((m,n) for m,n in legs if m != quote)
+        quote_amount = next(n for m,n in legs if m == quote)
+        at = float(tx['timestamp'])
+        if not math.isfinite(at) or at <= 0:
+            return None, 'invalid_timestamp'
+        quantity, quote_amount = float(abs(quantity)), float(abs(quote_amount))
+        if not all(math.isfinite(n) and n > 0 for n in (quantity,quote_amount)):
+            return None, 'invalid_event_amount'
+        return {'id':tx['signature'], 'asset':asset, 'quantity':quantity,
+                'quote_asset':quote, 'quote_amount':quote_amount, 'at':at,
+                'side':'buy' if next(n for m,n in legs if m == asset)>0 else 'sell',
+                'decoder':'outer_swap_event'}, None
+    except (KeyError, TypeError, ValueError, InvalidOperation, StopIteration):
+        return None, 'malformed_or_unowned_swap_event'
+
+
 def screen(db, wallets):
     """Describe observed samples; never approve a wallet for live copying."""
     reports = []
@@ -135,16 +198,16 @@ def screen(db, wallets):
             else:
                 skips[reason] += 1
         lots = defaultdict(lambda: [0., 0.])
-        pnl = 0.
+        pnl_by_quote = defaultdict(float)
         sells = 0
         unknown = False
         for f in sorted(fills, key=lambda x: (x['at'], x['id'])):
-            lot = lots[f['asset']]
+            lot = lots[(f['asset'], f['quote_asset'])]
             if f['side'] == 'buy':
                 lot[0] += f['quantity']; lot[1] += f['quote_amount']
             elif lot[0] > 0 and f['quantity'] <= lot[0]+1e-12:
                 cost = lot[1]*min(1, f['quantity']/lot[0])
-                pnl += f['quote_amount']-cost
+                pnl_by_quote[f['quote_asset']] += f['quote_amount']-cost
                 sells += 1
                 lot[0] = max(0, lot[0]-f['quantity'])
                 lot[1] = max(0, lot[1]-cost)
@@ -161,6 +224,8 @@ def screen(db, wallets):
             reasons.append('unsupported_history_items')
         reports.append({'wallet': wallet, 'status': 'research_candidate_only',
                         'decoded_swaps': len(fills), 'matched_sell_fills': sells,
-                        'sample_realized_gross_usdc': round(pnl, 6),
+                        'sample_realized_gross_usdc': round(pnl_by_quote[USDC], 6),
+                        'sample_realized_gross_sol': round(pnl_by_quote[SOL], 9),
+                        'decoded_by_method': dict(Counter(f['decoder'] for f in fills)),
                         'skipped_items': dict(skips), 'qualification_blocks': reasons})
     return reports
